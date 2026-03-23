@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Research Navigator</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    .card { box-shadow: 0 10px 30px rgba(0,0,0,0.08); }
+    .graph-node-paper { fill: #111827; }
+    .graph-node-concept { fill: #0ea5e9; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900">
+  <div class="max-w-7xl mx-auto px-6 py-10">
+    <header class="mb-8">
+      <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
+        <div>
+          <p class="uppercase tracking-[0.3em] text-xs text-sky-700 font-semibold">Portfolio Project</p>
+          <h1 class="text-4xl font-bold mt-2">AI Research Navigator</h1>
+          <p class="mt-3 text-slate-600 max-w-3xl">Search PubMed, cluster papers by theme, extract methods and entities, and ask grounded follow-up questions with citations.</p>
+        </div>
+        <div class="bg-white rounded-2xl card p-4 text-sm text-slate-600">
+          <div class="font-semibold text-slate-800">Best demo topics</div>
+          <div class="mt-2">glioblastoma immunotherapy</div>
+          <div>spatial transcriptomics alzheimer disease</div>
+          <div>liquid biopsy pancreatic cancer</div>
+        </div>
+      </div>
+    </header>
+
+    <section class="bg-white rounded-3xl card p-6 mb-8">
+      <div class="grid md:grid-cols-[1fr,140px] gap-4">
+        <input id="queryInput" class="w-full rounded-2xl border border-slate-200 px-5 py-4 text-lg focus:outline-none focus:ring-2 focus:ring-sky-500" placeholder="Enter a biomedical research topic..." value="glioblastoma immunotherapy" />
+        <button id="searchBtn" class="rounded-2xl bg-sky-600 text-white font-semibold px-5 py-4 hover:bg-sky-700 transition">Analyze</button>
+      </div>
+      <div class="mt-3 text-sm text-slate-500">This MVP uses PubMed abstracts and lightweight ML/NLP so it runs locally without a paid API.</div>
+    </section>
+
+    <div id="loading" class="hidden mb-6 text-sky-700 font-medium">Running literature search and analysis...</div>
+    <div id="error" class="hidden mb-6 bg-red-50 text-red-700 border border-red-200 rounded-2xl p-4"></div>
+
+    <section id="results" class="hidden space-y-8">
+      <div class="grid lg:grid-cols-[1.2fr,0.8fr] gap-8">
+        <div class="bg-white rounded-3xl card p-6">
+          <h2 class="text-2xl font-bold">Research overview</h2>
+          <p id="overview" class="mt-4 text-slate-700 leading-7"></p>
+          <div class="mt-6">
+            <h3 class="font-semibold text-slate-800 mb-3">Theme breakdown</h3>
+            <canvas id="themeChart" height="200"></canvas>
+          </div>
+        </div>
+        <div class="bg-white rounded-3xl card p-6">
+          <h2 class="text-2xl font-bold">Ask the paper set</h2>
+          <textarea id="askInput" class="mt-4 w-full rounded-2xl border border-slate-200 px-4 py-3 h-28" placeholder="Ask a follow-up question like: What biomarkers show up most often?"></textarea>
+          <button id="askBtn" class="mt-4 rounded-2xl bg-slate-900 text-white font-semibold px-5 py-3 hover:bg-slate-800 transition">Ask</button>
+          <div id="askAnswer" class="mt-5 text-slate-700 whitespace-pre-wrap leading-7"></div>
+          <div id="askCitations" class="mt-4 space-y-2"></div>
+        </div>
+      </div>
+
+      <div class="grid lg:grid-cols-[1fr,1fr] gap-8">
+        <div class="bg-white rounded-3xl card p-6">
+          <h2 class="text-2xl font-bold">Theme cards</h2>
+          <div id="themesList" class="mt-4 space-y-4"></div>
+        </div>
+        <div class="bg-white rounded-3xl card p-6 overflow-hidden">
+          <h2 class="text-2xl font-bold">Concept graph</h2>
+          <svg id="graph" viewBox="-250 -250 500 500" class="mt-4 w-full h-[420px] bg-slate-50 rounded-2xl border border-slate-200"></svg>
+        </div>
+      </div>
+
+      <div class="bg-white rounded-3xl card p-6">
+        <h2 class="text-2xl font-bold">Top papers</h2>
+        <div id="papersList" class="mt-5 grid gap-5"></div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    let currentContext = null;
+    let chart = null;
+
+    const loadingEl = document.getElementById('loading');
+    const errorEl = document.getElementById('error');
+    const resultsEl = document.getElementById('results');
+
+    document.getElementById('searchBtn').addEventListener('click', runSearch);
+    document.getElementById('askBtn').addEventListener('click', askQuestion);
+    document.getElementById('queryInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') runSearch();
+    });
+
+    async function runSearch() {
+      const query = document.getElementById('queryInput').value.trim();
+      if (!query) return;
+      errorEl.classList.add('hidden');
+      resultsEl.classList.add('hidden');
+      loadingEl.classList.remove('hidden');
+
+      try {
+        const response = await fetch('/api/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query, max_results: 12 })
+        });
+        if (!response.ok) throw new Error('Search failed.');
+        currentContext = await response.json();
+        renderResults(currentContext);
+      } catch (err) {
+        errorEl.textContent = err.message || 'Something went wrong.';
+        errorEl.classList.remove('hidden');
+      } finally {
+        loadingEl.classList.add('hidden');
+      }
+    }
+
+    async function askQuestion() {
+      const question = document.getElementById('askInput').value.trim();
+      if (!question || !currentContext) return;
+      const answerEl = document.getElementById('askAnswer');
+      const citesEl = document.getElementById('askCitations');
+      answerEl.textContent = 'Thinking over the paper set...';
+      citesEl.innerHTML = '';
+
+      try {
+        const response = await fetch('/api/ask', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ question, context: currentContext })
+        });
+        if (!response.ok) throw new Error('Question answering failed.');
+        const data = await response.json();
+        answerEl.textContent = data.answer;
+        citesEl.innerHTML = data.citations.map(c => `
+          <a href="${c.url}" target="_blank" class="block rounded-xl border border-slate-200 p-3 hover:bg-slate-50">
+            <span class="font-semibold">PMID ${c.pmid}</span><br />
+            <span class="text-slate-600">${c.title}</span>
+          </a>
+        `).join('');
+      } catch (err) {
+        answerEl.textContent = err.message || 'Could not answer that question.';
+      }
+    }
+
+    function renderResults(data) {
+      resultsEl.classList.remove('hidden');
+      document.getElementById('overview').textContent = data.overview;
+      renderThemeChart(data.themes);
+      renderThemes(data.themes, data.papers);
+      renderPapers(data.papers);
+      renderGraph(data.graph);
+    }
+
+    function renderThemeChart(themes) {
+      const ctx = document.getElementById('themeChart');
+      if (chart) chart.destroy();
+      chart = new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels: themes.map(t => t.theme),
+          datasets: [{
+            label: 'Papers per theme',
+            data: themes.map(t => t.paper_indices.length),
+            borderWidth: 1
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { display: false } },
+          scales: { y: { beginAtZero: true, ticks: { precision: 0 } } }
+        }
+      });
+    }
+
+    function renderThemes(themes, papers) {
+      const list = document.getElementById('themesList');
+      list.innerHTML = themes.map(theme => {
+        const linkedPapers = theme.paper_indices.slice(0, 3).map(i => papers[i]?.title).filter(Boolean);
+        return `
+          <div class="rounded-2xl border border-slate-200 p-4">
+            <div class="flex items-start justify-between gap-4">
+              <div>
+                <div class="text-lg font-semibold">${theme.theme}</div>
+                <div class="mt-2 flex flex-wrap gap-2">
+                  ${theme.keywords.map(k => `<span class="px-3 py-1 rounded-full bg-sky-50 text-sky-800 text-sm">${k}</span>`).join('')}
+                </div>
+              </div>
+              <div class="text-sm text-slate-500 whitespace-nowrap">${theme.paper_indices.length} papers</div>
+            </div>
+            <div class="mt-4 text-sm text-slate-600 space-y-1">
+              ${linkedPapers.map(t => `<div>• ${t}</div>`).join('')}
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function renderPapers(papers) {
+      const list = document.getElementById('papersList');
+      list.innerHTML = papers.map(paper => `
+        <article class="rounded-2xl border border-slate-200 p-5">
+          <div class="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+            <div>
+              <a href="${paper.url}" target="_blank" class="text-xl font-semibold hover:text-sky-700">${paper.title}</a>
+              <div class="mt-2 text-sm text-slate-500">${paper.journal || 'Journal unavailable'} • ${paper.year} • Relevance ${paper.relevance}</div>
+              <div class="mt-1 text-sm text-slate-500">${(paper.authors || []).slice(0, 5).join(', ')}</div>
+            </div>
+            <div class="text-right">
+              <div class="text-xs uppercase tracking-wide text-slate-400">Top keywords</div>
+              <div class="mt-2 flex flex-wrap gap-2 justify-end">
+                ${(paper.keywords || []).slice(0, 5).map(k => `<span class="px-3 py-1 rounded-full bg-slate-100 text-slate-700 text-sm">${k}</span>`).join('')}
+              </div>
+            </div>
+          </div>
+          <p class="mt-4 text-slate-700 leading-7">${paper.summary}</p>
+          <div class="mt-4 grid md:grid-cols-3 gap-3 text-sm">
+            ${Object.entries(paper.entities || {}).map(([k, vals]) => `
+              <div class="rounded-xl bg-slate-50 p-3">
+                <div class="font-semibold text-slate-800 capitalize">${k.replaceAll('_',' ')}</div>
+                <div class="mt-2 text-slate-600">${(vals || []).length ? vals.join(', ') : 'None extracted'}</div>
+              </div>
+            `).join('')}
+          </div>
+        </article>
+      `).join('');
+    }
+
+    function renderGraph(graph) {
+      const svg = document.getElementById('graph');
+      svg.innerHTML = '';
+
+      const ns = 'http://www.w3.org/2000/svg';
+      graph.edges.forEach(edge => {
+        const source = graph.nodes.find(n => n.id === edge.source);
+        const target = graph.nodes.find(n => n.id === edge.target);
+        if (!source || !target) return;
+        const line = document.createElementNS(ns, 'line');
+        line.setAttribute('x1', source.x * 180);
+        line.setAttribute('y1', source.y * 180);
+        line.setAttribute('x2', target.x * 180);
+        line.setAttribute('y2', target.y * 180);
+        line.setAttribute('stroke', '#cbd5e1');
+        line.setAttribute('stroke-width', '1.5');
+        svg.appendChild(line);
+      });
+
+      graph.nodes.forEach(node => {
+        const group = document.createElementNS(ns, 'g');
+        const circle = document.createElementNS(ns, 'circle');
+        circle.setAttribute('cx', node.x * 180);
+        circle.setAttribute('cy', node.y * 180);
+        circle.setAttribute('r', node.kind === 'paper' ? '8' : '6');
+        circle.setAttribute('class', node.kind === 'paper' ? 'graph-node-paper' : 'graph-node-concept');
+        group.appendChild(circle);
+
+        const label = document.createElementNS(ns, 'text');
+        label.setAttribute('x', node.x * 180 + 10);
+        label.setAttribute('y', node.y * 180 + 4);
+        label.setAttribute('font-size', '11');
+        label.setAttribute('fill', '#334155');
+        label.textContent = node.label;
+        group.appendChild(label);
+
+        if (node.url) {
+          group.style.cursor = 'pointer';
+          group.addEventListener('click', () => window.open(node.url, '_blank'));
+        }
+        svg.appendChild(group);
+      });
+    }
+
+    runSearch();
+  </script>
+</body>
+</html>
